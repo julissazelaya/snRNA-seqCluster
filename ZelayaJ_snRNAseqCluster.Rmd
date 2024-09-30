@@ -1,5 +1,5 @@
 ---
-title: "GSE Clustering"
+title: "snRNA-seq Clustering"
 author: "Julissa Zelaya-Portillo"
 date: "2024-09-24"
 output: pdf_document
