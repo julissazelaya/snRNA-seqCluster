@@ -1,0 +1,285 @@
+---
+title: "GSE Clustering"
+author: "Julissa Zelaya-Portillo"
+date: "2024-09-24"
+output: pdf_document
+---
+
+The GSE accession, GSE138852, maps to a specific dataset focused on single-cell RNA-sequencing (snRNA-seq) of Alzheimer's disease and control samples. In the analysis of this data, Seurat will be used to categorize single nuclei into clusters based on their gene expression heterogeneity. Seurat is an R package designed for exploration, analysis, and quality-control of snRNA-seq data.
+
+```{r library, include=FALSE}
+# Check and install Seurat if it is not installed, including dependencies
+if (!requireNamespace("Seurat", quietly = TRUE)) {
+  install.packages("Seurat", dependencies = TRUE)
+}
+
+# Load Seurat
+library(Seurat)
+library(readr)
+library(dplyr)
+```
+
+## Create a Seurat Object
+
+The GSE138852 snRNA-seq data is pulled from the GEO database. This may be done manually from the GEO database, using the GEO REST API, or using command-line 
+tools like `wget` to download the count matrix file. The analysis will begin with the assumption that base calling, mapping, and read counting on the GSE138852 dataset has been done. 
+
+The count matrix data is read and a Seurat object is created to allow Seurat to
+store the steps and results of the forming analysis. 
+
+```{r seuratObject, warning=FALSE}
+# Read the CSV file directly
+count_matrix <- read.csv("GSE138852_counts.csv", header = TRUE, row.names = 1)
+
+# Convert the count matrix to a Seurat object
+seurat_obj <- CreateSeuratObject(counts = count_matrix)
+```
+
+## Quality Control
+
+Poor-quality cells such as those with low gene counts or high mitochondrial
+RNA content are generally filtered out to reduce noise in the data. 
+
+Gene counts are summarized by Seurat automatically when the Seurat object is
+created but the mitochondrial transcript percentage needs to be calculated
+manually via the `PercentageFeatureSet` function. 
+
+To filter out outlier cells, the distribution is observed by creating a violin
+plot for the following three metrics: the number of features or distinct genes
+in a particular cell, the total count of all RNA molecules in that cell, and the
+percentage of mitochondrial transcript that was previously calculated. 
+
+```{r qualityControl, warning=FALSE}
+# Calculate QC metrics
+seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-")
+
+# Plot QC metrics
+VlnPlot(seurat_obj, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+Another version of the above plot is shown below, removing the use of dots (show
+of individual cells).
+
+```{r qcPlot, warning=FALSE}
+VlnPlot(seurat_obj, 
+        features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), 
+        ncol = 3, pt.size=0)
+```
+
+Based on common practices, detected gene numbers outside of 200 and 2500 features
+are removed as they may indicate low RNA content. It is also common to remove cells
+with greater than 5% mitochondrial transcript. Cells over this threshold may have
+low-quality cells. A subset of the Seurat data, removing these outliers, then
+proceeds forward in the working analysis. 
+
+```{r qcSubset}
+# Filter based on QC metrics
+qc_subset <- subset(seurat_obj, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+```
+
+## Normalization
+
+Normalization aims to make gene expression between cells comparable. 
+
+```{r normalization, echo=FALSE, results='hide'}
+seurat_norm <- NormalizeData(qc_subset)
+```
+
+## Feature Selection
+
+Feature selection is performed to identify highly variable features/genes based on the most varied expression level across cells. Seurat calculates the standard
+variance of each gene across cells and picks the top 2000 as being the highly
+variable features. This should reduce noise and improve model performance. 
+
+```{r featureSelect, echo=TRUE, results='hide'}
+# Find Variable Features
+seurat_feat <- FindVariableFeatures(seurat_norm)
+```
+
+## Data Scaling
+
+Different genes have different base expression levels and distributions. 
+To avoid the analysis depending on genes that are highly expressed, data scaling is performed. 
+
+```{r scale, echo=TRUE, results='hide'}
+# Data scaling
+seurat_scale <- ScaleData(seurat_feat)
+```
+
+## Principal Component Analysis (PCA)
+
+Applying a linear dimension reduction is beneficial to make the data more compact
+and is here done using Principal Component Analysis (PCA).
+
+```{r pca, echo=TRUE, results='hide'}
+# PCA
+seurat_PCA <- RunPCA(seurat_scale)
+```
+
+To make decisions based on the PCA analysis, the `Embeddings` function constructs
+an elbow plot to show the standardized variation of all the PCs that are calculated.
+Higher-ranked PCs have higher standard deviations and explain more variation in the
+data than lower-ranked PCs. 
+
+```{r pcaPlot}
+ElbowPlot(seurat_PCA, ndims = ncol(Embeddings(seurat_PCA, "pca")))
+```
+
+The "elbow" point or turning point of the curve occurs in the 5th/6th PCs and then
+becomes flat. The first phase of the curve could represent the signal related to
+biological differences between cell populations while the second phase could
+represent technical variations. 
+
+
+## Clustering Analysis
+
+First, a k-nearest neighbor of cells is created to create a connection between
+cells with the shortest distance based on their PC values. With the k-NN
+network created, the clustering algorithm used by Seurat is applied. 
+
+```{r clustering}
+# A k-Nearest Neighbor is done through Seurat
+seurat_kNN <- FindNeighbors(seurat_PCA)
+
+# Clustering analysis
+seurat_clustered <- FindClusters(seurat_kNN, resolution = 0.5)
+```
+
+## Non-Linear Dimension
+
+The linear dimension that was previously run lacks the three dimensional analysis that is here presented with UMAP (Uniform Manifold Approximation and Projection). Using the clustered analysis, we now have a visual of our cluster networks.
+
+```{r clusterPlot, echo=TRUE, results='hide'}
+# Run UMPA and then plot UMAP 
+seurat_umap <- RunUMAP(seurat_clustered, dims = 1:10)
+
+# Visualize UMAP
+cluster_plot <- DimPlot(seurat_umap, reduction = "umap", label = TRUE)
+cluster_plot
+```
+
+The results of the non-linear dimension analysis can then be visualized. From here
+it is evident that there are 12 distinct clusters. Areas of minimal overlap such as
+clusters 0, 1, and 2 suggest strong heterogeneity between cell populations. Due to their large size, they may also represent major cell populations. On the other hand, cluster 12 appears as a small outlier which would require further analysis to determine if there is additional technical noise that could be resolved during
+our data quality process. 
+
+## Cluster Annotation
+
+To later isolate the astrocytes from the dataset and make more specific analyses
+of the clustering and later sub-clutering results, annotation of cell clusters is performed. Typical markers of astrocytes are the following labels: GFAP / AQP4 / S100B. First the expression of known astrocyte markers are plotted to determine
+which clusters are likely to be astrocytes. 
+
+```{r astroMarkers}
+# Visualize the expression of astrocyte markers
+FeaturePlot(seurat_umap, features = c("GFAP", "AQP4", "S100B"), label = TRUE)
+```
+
+Based on the subjective analysis of the above plot, it is determined that clusters
+1, 3, 6, and 8 may be astrocytes. It is important to note that are less subjective
+tools to labeling astrocytes that would require additional tools and analyses. 
+
+Below, the identities of astrocytes are established based on marker gene
+expression. The annotations are then verified through another UMAP plot. 
+
+```{r annotation}
+# Rename identities for astrocytes based on marker gene expression
+seurat_astroAnnot <- RenameIdents(seurat_umap, `1` = "Astrocyte", `3` = "Astrocyte", `6` = "Astrocyte", `8` = "Astrocyte")
+
+# Verify the annotation by visualizing the UMAP plot with labels
+DimPlot(seurat_astroAnnot, reduction = "umap", label = TRUE)
+```
+
+Upon verifying the astrocyte annotations, these astrocytes are subseted for 
+further analysis. 
+
+```{r astroSubset}
+# Isolate the astrocytes from the original Seurate dataset 
+astrocytes <- subset(seurat_astroAnnot, idents = "Astrocyte")
+```
+
+
+## Sub-Clustering Analysis
+
+Analysis such as sub-clustering can further help to interpret the biological significance of these clusters.
+
+The following manipulations aim to merge the metadata of the astrocytes subset with
+the AD classification within the covariates file. This mapping will allow this
+analysis to determine whether there are any Alzheimer's Disease (AD)- specific
+subclusters. The `AddMetaData` of the Seurat package facilitates this merge. 
+
+```{r loadCovariates}
+# Load the covariates data
+covariates <- read.csv("GSE138852_covariates.csv")
+
+# Set row names for the covariates
+row.names(covariates) <- covariates$X
+
+# Ensure the covariates are properly aligned with the Seurat object
+astrocytes <- AddMetaData(object = astrocytes, metadata = covariates[, c("oupSample.subclustID", "oupSample.subclustCond")])
+
+# Check if the metadata has been added successfully
+head(astrocytes@meta.data)
+```
+
+The process of identifying sub-clusters within astrocytes then begins below.
+
+```{r subCluster}
+# Identify sub-clusters within astrocytes
+astrocytes <- FindNeighbors(astrocytes, dims = 1:10)
+astrocytes <- FindClusters(astrocytes, resolution = 0.5)  
+astrocytes <- RunUMAP(astrocytes, dims = 1:10)
+
+# Visualize the astrocyte sub-clusters
+DimPlot(astrocytes, reduction = "umap", label = TRUE, group.by = "seurat_clusters")
+```
+
+There are seven identified subclusters in the isolated astrocytes. There appears
+to be stronger heterogeneity in clusters 0 and 3 followed by 4, 5, and 6. The
+overlap in clusters 1 and 2 may reflect weak evidence of heterogeneity. In addition, the small size of cluster 7 may be an outlier due to its very small representation
+of the astrocyte population. 
+
+```{r plotDiseaseStatus}
+# Visualize the astrocyte sub-clusters with disease status
+DimPlot(astrocytes, reduction = "umap", group.by = "oupSample.subclustCond", label = TRUE)
+
+```
+
+Based on the visualization above, it appears that the previously labeled sub-clusters of 0,3,4 and 5 are marked with the AD disease status. 
+
+This is further supported by the table visualization of the proportion of cells
+in each sub-cluster for AD and controls. 
+
+```{r tableDiseaseStatus}
+# Check the proportion of cells in each sub-cluster for AD and Control
+table(astrocytes$seurat_clusters, astrocytes$oupSample.subclustCond)
+```
+
+## Differential Analysis
+
+Cluster zero is chosen among the astrocytes sub-clusters and a differential gene
+expression analysis between the AD and control group is performed.
+
+```{r differentialAnalysis}
+# Using sub-cluster 0 for analysis
+selected_cluster <- subset(astrocytes, idents = 0)
+
+# Set the identities in selected_cluster based on the condition
+Idents(selected_cluster) <- selected_cluster$oupSample.subclustCond
+
+# Verify the identities
+# table(Idents(selected_cluster))
+
+# Run differential expression analysis
+de_results <- FindMarkers(selected_cluster, ident.1 = "AD", ident.2 = "ct", test.use = "wilcox")
+
+# View the top differentially expressed genes
+head(de_results)
+```
+
+The use of the Wilcoxon Rank-Sum test is to compare two independent groups, being
+the AD and control groups. This analytical method is also best for non-parametric
+data like snRNA seq data that doesn't meet the assumptions for parametric tests. Therefore the parameters of the differential expression analysis reflect the
+two comparison groups and the specification of the "wilcox" test.
+
+The final result of this analysis should show the list of genes that show
+significant difference in expression between the AD and control groups. This can provide insight into genes that may be responsible for disease states. 
